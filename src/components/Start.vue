@@ -227,6 +227,16 @@ const filteredStations = ref([]);
 const filteredStreets = ref([]);
 const selectedPoste = ref(null);
 const multipleChoiceSelections = ref([]);
+const isFinishing = ref(false);
+
+// Expose refs for testing purposes
+defineExpose({
+  enqueteur: enqueteur,
+  startDate: startDate,
+  answers: answers,
+  isFinishing: isFinishing,
+  currentStep: currentStep,
+});
 
 // Firestore refs
 const surveyCollectionRef = collection(db, "commerces");
@@ -366,6 +376,7 @@ const startSurvey = () => {
   // Clear any previous sessionStorage to start fresh
   sessionStorage.removeItem("vehicleType");
 
+  
   // Reset all state
   currentStep.value = "survey";
   isSurveyComplete.value = false;
@@ -682,91 +693,105 @@ const previousQuestion = () => {
 };
 
 const finishSurvey = async () => {
-  // First, capture all necessary data before changing state
-  const surveyData = { ...answers.value }; // Create a copy of the answers
-  const capturedQuestionAnswers = [...(surveyData.question_answers || [])];
-
-  // Now set survey to complete
-  isSurveyComplete.value = true;
-  const now = new Date();
-  const uniqueId = await getNextId();
-
-  console.log("===== FINISHING SURVEY =====");
-  console.log("Captured question_answers:", capturedQuestionAnswers.length);
-
-  // Log all answers for debugging
-  console.log("Survey answers before saving:", surveyData);
-
-  // Create answers object with basic info
-  const orderedAnswers = {
-    ID_questionnaire: uniqueId,
-    firebase_timestamp: new Date().toISOString(),
-    HEURE_DEBUT: startDate.value || "",
-    DATE: now.toLocaleDateString("fr-FR").replace(/\//g, "-"),
-    JOUR: [
-      "Dimanche",
-      "Lundi",
-      "Mardi",
-      "Mercredi",
-      "Jeudi",
-      "Vendredi",
-      "Samedi",
-    ][now.getDay()],
-    HEURE_FIN: now.toLocaleTimeString("fr-FR").slice(0, 5),
-    ENQUETEUR: enqueteur.value,
-  };
-
-  // Add individual question answers as separate fields
-  if (capturedQuestionAnswers && capturedQuestionAnswers.length > 0) {
-    capturedQuestionAnswers.forEach(qa => {
-      // For free text questions, save the text value
-      if (qa.optionId === "freetext") {
-        orderedAnswers[qa.questionId] = qa.optionText;
-      } else {
-        // For multiple choice questions, save the option ID
-        orderedAnswers[qa.questionId] = qa.optionId;
-      }
-    });
+  if (isFinishing.value) {
+    console.warn("finishSurvey called while already in progress.");
+    return;
   }
+  isFinishing.value = true; // Set flag immediately
 
-  // Loop through all entries in captured surveyData
-  for (const [key, value] of Object.entries(surveyData)) {
-    // Skip question_answers and any _text fields
-    if (
-      key !== "question_answers" &&
-      !key.includes("_text") // Skip all _text fields
-    ) {
-      // Add to the orderedAnswers if not already added
-      if (!orderedAnswers.hasOwnProperty(key)) {
-        orderedAnswers[key] = value;
+  try { // Wrap the entire operation in try/catch/finally
+    // First, capture all necessary data with deep copy for answers BEFORE any async or state changes
+    const capturedStartDate = startDate.value;
+    const capturedAnswers = JSON.parse(JSON.stringify(answers.value)); // Deep copy
+    const capturedEnqueteur = enqueteur.value;
+    const capturedQuestionPath = [...questionPath.value];
+
+    // Now set survey to complete, this might change UI
+    isSurveyComplete.value = true;
+    const now = new Date(); // Capture end time after all answers are finalized conceptually
+    
+    console.log("===== FINISHING SURVEY (Captured State) =====");
+    console.log("Captured Start Date:", capturedStartDate);
+    console.log("Captured Answers:", capturedAnswers);
+    console.log("Captured Enqueteur:", capturedEnqueteur);
+    console.log("Captured Question Path:", capturedQuestionPath);
+    console.log("Captured question_answers length:", capturedAnswers.question_answers?.length || 0);
+
+    const uniqueId = await getNextId(); // getNextId can be awaited here
+
+    // Create answers object with basic info using CAPTURED values
+    const orderedAnswers = {
+      ID_questionnaire: uniqueId,
+      firebase_timestamp: new Date().toISOString(), // Timestamp of saving
+      HEURE_DEBUT: capturedStartDate || "",
+      DATE: now.toLocaleDateString("fr-FR").replace(/\//g, "-"), // Corrected Regex
+      JOUR: [
+        "Dimanche",
+        "Lundi",
+        "Mardi",
+        "Mercredi",
+        "Jeudi",
+        "Vendredi",
+        "Samedi",
+      ][now.getDay()],
+      HEURE_FIN: now.toLocaleTimeString("fr-FR").slice(0, 5),
+      ENQUETEUR: capturedEnqueteur,
+    };
+
+    // Add individual question answers as separate fields from CAPTURED answers
+    if (capturedAnswers.question_answers && capturedAnswers.question_answers.length > 0) {
+      capturedAnswers.question_answers.forEach(qa => {
+        if (qa.optionId === "freetext") {
+          orderedAnswers[qa.questionId] = qa.optionText;
+        } else {
+          orderedAnswers[qa.questionId] = qa.optionId;
+        }
+      });
+    }
+
+    for (const [key, value] of Object.entries(capturedAnswers)) {
+      if (
+        key !== "question_answers" &&
+        !key.includes("_text") 
+      ) {
+        if (!orderedAnswers.hasOwnProperty(key)) {
+          orderedAnswers[key] = value;
+        }
       }
     }
-  }
-
-  // DO NOT include question_answers array in the saved data
-
-  try {
-    // Log what we're about to save
-    console.log("Saving survey data:", orderedAnswers);
-
-    // Save to Firebase
+    
+    console.log("Saving survey data to Firebase:", orderedAnswers);
     const docRef = await addDoc(surveyCollectionRef, orderedAnswers);
-
-    // Store the Firestore document ID in our response
     console.log("Survey saved with ID:", uniqueId, "Firestore ID:", docRef.id);
-
-    // Update the orderedAnswers with the Firestore ID - this will be part of the document in Firebase
+    
     const updatedData = { firestore_id: docRef.id };
     await setDoc(docRef, updatedData, { merge: true });
-
-    // Also log the document ID separately for easy copying
     console.log("DOCUMENT ID FOR REFERENCE:", docRef.id);
+
+    // Clear persisted survey state from sessionStorage after successful save
+    sessionStorage.removeItem("surveyStartDate");
+    sessionStorage.removeItem("surveyAnswers");
+    sessionStorage.removeItem("surveyCurrentQuestionIndex");
+    sessionStorage.removeItem("surveyQuestionPath");
+    sessionStorage.removeItem("surveyCurrentStep");
+    sessionStorage.removeItem("surveyEnqueteur");
+    sessionStorage.removeItem("surveyIsEnqueteurSaved");
+
   } catch (error) {
     console.error("Error saving survey:", error);
+    // Consider how to handle errors, e.g., should isSurveyComplete be reset?
+    // For now, isSurveyComplete remains true, and the user sees the "Merci" message.
+  } finally {
+    isFinishing.value = false; // Ensure flag is always reset
   }
 };
 
 const resetSurvey = () => {
+  if (isFinishing.value) {
+    console.warn("Reset survey called while finishing is in progress. Reset deferred/ignored.");
+    return; 
+  }
+
   // Clear any vehicle type in session storage
   sessionStorage.removeItem("vehicleType");
 

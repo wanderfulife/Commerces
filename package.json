@@ -18,9 +18,9 @@
   "devDependencies": {
     "@rollup/plugin-json": "^6.1.0",
     "@vitejs/plugin-vue": "^4.5.2",
-    "@vue/test-utils": "^2.4.3",
+    "@vue/test-utils": "^2.4.6",
     "jsdom": "^23.0.1",
     "vite": "^5.0.10",
-    "vitest": "^1.0.4"
+    "vitest": "^1.6.1"
   }
 }
